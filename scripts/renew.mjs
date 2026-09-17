@@ -96,11 +96,13 @@ async function main() {
   console.log(`[renew] 接口=${BASE_URL}`);
   console.log(`[renew] 规则: 到期前 ${THRESHOLD_DAYS} 天内续期,每次 ${YEARS} 年,免费域名自动续,DRY_RUN=${DRY_RUN}`);
 
-  // 1) 列出所有域名
+  // 1) 列出所有域名(兼容 data 为数组,或 data 内嵌 domains/items)
   let domains = [];
   try {
     const r = await api('/domains');
-    domains = Array.isArray(r?.data) ? r.data : [];
+    if (Array.isArray(r?.data)) domains = r.data;
+    else if (Array.isArray(r?.data?.domains)) domains = r.data.domains;
+    else if (Array.isArray(r?.data?.items)) domains = r.data.items;
   } catch (e) {
     console.error(`[renew] 获取域名列表失败: ${e.message}`);
     process.exit(1);
@@ -111,7 +113,9 @@ async function main() {
   const results = [];
   let failures = 0;
   for (const d of domains) {
-    const name = d.name;
+    // 兼容不同字段名:name / domain / hostname
+    const name = d.name ?? d.domain ?? d.hostname ?? String(d.id ?? '?');
+    console.log(`[debug] 域名对象字段: ${Object.keys(d).join(', ')}`);
     const days = daysUntil(d.expiry_date);
     const slot = d.slot_type || d.lifecycle_type || 'unknown';
     const isFree = slot === 'free';
