@@ -7,11 +7,12 @@
 //   Linux/macOS: DIGITALPLAT_API_KEY=dp_live_xxx node scripts/renew.mjs
 //
 // 内置默认规则(开箱即用,也可用环境变量覆盖):
-//   - 续期窗口:  到期前 120 天内开始续期(免费域名规则:少于 120 天可免费续期一年)
+//   - 续期窗口:  到期前 120 天内开始续期
 //   - 每次续期:  1 年
 //   - 免费域名:  默认自动续,支付方式 "free"(免费);若被拒则回退为不带支付方式重试一次
 //   - 其他域名:  支付方式 "credits"
 //   - 真实运行:  默认直接续期;加 --dry-run 参数(或 DRY_RUN=true)只预览不动手
+//   - 诊断:      加 --json 参数会打印接口完整原始响应
 //
 // 可选环境变量(全部有内置默认,通常不用设):
 //   DIGITALPLAT_BASE_URL    API 地址,默认 https://domain-api.digitalplat.org/api/v1
@@ -34,11 +35,12 @@ const PAYMENT_FREE = process.env.RENEW_PAYMENT_FREE || 'free';
 const PAYMENT_PAID = process.env.RENEW_PAYMENT_PAID || 'credits';
 const DELAY_MS = Number.parseInt(process.env.RENEW_DELAY_MS || '300', 10);
 const DRY_RUN = process.argv.includes('--dry-run') || (process.env.DRY_RUN || '').toLowerCase() === 'true';
+const PRINT_JSON = process.argv.includes('--json');
 
-/** 计算到期日距今天的天数;无法解析返回 null */
-function daysUntil(expiryDate) {
-  if (!expiryDate) return null;
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(expiryDate).trim());
+/** 计算到期日距今天的天数;无法解析返回 null。支持 YYYY-MM-DD 或 ISO 时间戳 */
+function daysUntil(expiry) {
+  if (!expiry) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(expiry).trim());
   if (!m) return null;
   const exp = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
   const now = new Date();
@@ -68,7 +70,7 @@ async function api(path, { method = 'GET', body } = {}) {
   return json;
 }
 
-/** 简单对齐表格:headers 为列名数组,rows 为每行的单元格数组 */
+/** 简单对齐表格 */
 function fmtTable(headers, rows) {
   const widths = headers.map((h, i) =>
     Math.max(String(h).length, ...rows.map((r) => String(r[i] ?? '').length))
@@ -120,22 +122,21 @@ async function main() {
     console.error(`[renew] 获取域名列表失败: ${e.message}`);
     process.exit(1);
   }
+  if (PRINT_JSON) console.log('=== 完整原始响应 ===\n' + JSON.stringify({ data: domains }, null, 2));
   console.log(`[renew] 共 ${domains.length} 个域名\n`);
 
-  // 2) 生成检查表(域名/状态/到期时间/剩余天数)
+  // 2) 生成检查表。DigitalPlat 实际字段: domain / expires_at / slot_type / auto_renew
   const rows = domains.map((d) => {
-    const name = d.name ?? d.domain ?? d.hostname ?? String(d.id ?? '?');
-    const expiry = d.expiry_date ?? '永久';
-    const days = daysUntil(d.expiry_date);
+    const name = d.domain ?? d.name ?? d.hostname ?? String(d.id ?? '?');
+    const expiry = d.expires_at ?? d.expiry_date ?? '永久';
+    const days = daysUntil(d.expires_at ?? d.expiry_date);
     let status;
     if (days === null) status = '永久有效';
     else if (days <= THRESHOLD_DAYS) status = '窗口内';
     else status = '窗口外';
-    return { name, expiry, days, status, raw: d };
+    return { name, expiry, days, status, autoRenew: d.auto_renew ? '是' : '否', isFree: (d.slot_type || d.lifecycle_type) === 'free', raw: d };
   });
-  // 先打一行字段名便于确认接口结构(字段确认后可以删除)
-  for (const r of rows) console.log(`[debug] 字段: ${Object.keys(r.raw).join(', ')}`);
-  console.log(fmtTable(['域名', '状态', '到期时间', '剩余天数'], rows.map((r) => [r.name, r.status, r.expiry, r.days === null ? '永久' : `${r.days}天`])));
+  console.log(fmtTable(['域名', '状态', '到期时间', '剩余天数', '自动续'], rows.map((r) => [r.name, r.status, String(r.expiry).slice(0, 10), r.days === null ? '永久' : `${r.days}天`, r.autoRenew])));
   console.log('');
 
   // 3) 自动续期明细:只处理窗口内的域名
@@ -144,15 +145,12 @@ async function main() {
   const results = [];
   let failures = 0;
   for (const r of due) {
-    const d = r.raw;
-    const slot = d.slot_type || d.lifecycle_type || 'unknown';
-    const isFree = slot === 'free';
     if (DRY_RUN) {
       console.log(`  [DRY-RUN] ${r.name} 剩余 ${r.days} 天,将续期 ${YEARS} 年`);
       results.push({ name: r.name, action: 'dry-run-将续期' });
       continue;
     }
-    const outcome = await renewDomain(r.name, isFree);
+    const outcome = await renewDomain(r.name, r.isFree);
     if (outcome.ok) {
       console.log(`  ✔ ${r.name} 续期成功${outcome.note ? `(${outcome.note})` : ''}`);
       results.push({ name: r.name, action: 'renewed' });
