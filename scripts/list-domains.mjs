@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 辅助工具:列出账号下所有域名及其到期状态,并打印接口的完整原始响应(便于排查字段差异)。
+// 辅助工具:打印接口完整原始响应 + 域名检查表格(不修改任何数据)。
 // 用法:  DIGITALPLAT_API_KEY=dp_live_xxx node scripts/list-domains.mjs
 const BASE_URL = process.env.DIGITALPLAT_BASE_URL || 'https://domain-api.digitalplat.org/api/v1';
 const API_KEY = process.env.DIGITALPLAT_API_KEY || '';
@@ -30,13 +30,33 @@ if (Array.isArray(json?.data)) domains = json.data;
 else if (Array.isArray(json?.data?.domains)) domains = json.data.domains;
 else if (Array.isArray(json?.data?.items)) domains = json.data.items;
 
-console.log(`共 ${domains.length} 个域名:\n`);
-for (const d of domains) {
-  // 兼容不同字段名:name / domain / hostname
-  const name = d.name ?? d.domain ?? d.hostname ?? d.id ?? '?';
-  console.log(
-    `  ${String(name).padEnd(30)} status=${String(d.status ?? '-').padEnd(8)} ` +
-    `slot=${String(d.slot_type ?? '-').padEnd(14)} expiry=${d.expiry_date ?? '-'}`
+function fmtTable(headers, rows) {
+  const widths = headers.map((h, i) =>
+    Math.max(String(h).length, ...rows.map((r) => String(r[i] ?? '').length))
   );
-  console.log(`     字段: ${Object.keys(d).join(', ')}`);
+  const line = (cells) => '  ' + cells.map((c, i) => String(c ?? '').padEnd(widths[i])).join('  ');
+  const sep = '  ' + widths.map((w) => '-'.repeat(w)).join('  ');
+  return [line(headers), sep, ...rows.map((r) => line(r))].join('\n');
 }
+
+const THRESHOLD_DAYS = Number.parseInt(process.env.RENEW_THRESHOLD_DAYS || '120', 10);
+function daysUntil(expiryDate) {
+  if (!expiryDate) return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(expiryDate).trim());
+  if (!m) return null;
+  const exp = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const now = new Date();
+  const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
+  return Math.round((exp - today) / 86400000);
+}
+
+console.log(`共 ${domains.length} 个域名:\n`);
+const rows = domains.map((d) => {
+  const name = d.name ?? d.domain ?? d.hostname ?? String(d.id ?? '?');
+  const expiry = d.expiry_date ?? '永久';
+  const days = daysUntil(d.expiry_date);
+  const status = days === null ? '永久有效' : days <= THRESHOLD_DAYS ? '窗口内' : '窗口外';
+  return [name, status, expiry, days === null ? '永久' : `${days}天`];
+});
+console.log(fmtTable(['域名', '状态', '到期时间', '剩余天数'], rows));
+console.log('\n(字段: ' + (domains[0] ? Object.keys(domains[0]).join(', ') : '无') + ')');
