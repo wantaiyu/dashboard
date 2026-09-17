@@ -3,7 +3,7 @@ name: digitalplat-renew
 on:
   schedule:
     # 每天 UTC 03:17 运行(也可自行改成每周,如 '17 3 * * 1')
-    - cron: '17 3 * * *'
+    - cron: '17 3 * * 1'
   workflow_dispatch: {}
 
 permissions:
