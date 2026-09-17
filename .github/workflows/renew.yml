@@ -1,0 +1,38 @@
+name: digitalplat-renew
+
+on:
+  schedule:
+    # 每天 UTC 03:17 运行(也可自行改成每周,如 '17 3 * * 1')
+    - cron: '17 3 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 列出域名(仅确认连接,不修改)
+        run: node scripts/list-domains.mjs
+        env:
+          DIGITALPLAT_API_KEY: ${{ secrets.DIGITALPLAT_API_KEY }}
+
+      - name: 自动续期到期域名(内置规则:到期前120天内、免费域名免费续一年)
+        run: node scripts/renew.mjs
+        env:
+          DIGITALPLAT_API_KEY: ${{ secrets.DIGITALPLAT_API_KEY }}
+          # 以下全部可选,不设置即用脚本内置默认(见 scripts/renew.mjs 顶部说明):
+          # RENEW_THRESHOLD_DAYS: '120'
+          # RENEW_YEARS: '1'
+          # RENEW_PAYMENT_METHOD: ''
+          # RENEW_PAYMENT_FREE: 'free'
+          # RENEW_PAYMENT_PAID: 'credits'
+          # RENEW_DELAY_MS: '300'
+          # DRY_RUN: 'false'
