@@ -24,6 +24,7 @@
 //   RENEW_DELAY_MS          每个请求间隔毫秒,默认 300
 //   DRY_RUN                 true/false 是否只预览
 import { setTimeout as sleep } from 'node:timers/promises';
+import { appendFileSync } from 'node:fs';
 
 const BASE_URL = process.env.DIGITALPLAT_BASE_URL || 'https://domain-api.digitalplat.org/api/v1';
 const API_KEY = process.env.DIGITALPLAT_API_KEY || '';
@@ -37,15 +38,29 @@ const DELAY_MS = Number.parseInt(process.env.RENEW_DELAY_MS || '300', 10);
 const DRY_RUN = process.argv.includes('--dry-run') || (process.env.DRY_RUN || '').toLowerCase() === 'true';
 const PRINT_JSON = process.argv.includes('--json');
 
-/** 计算到期日距今天的天数;无法解析返回 null。支持 YYYY-MM-DD 或 ISO 时间戳 */
-function daysUntil(expiry) {
+/** 解析日期:支持 YYYY-MM-DD、YYYYMMDD、ISO 时间戳;失败返回 null */
+function parseDate(expiry) {
   if (!expiry) return null;
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(expiry).trim());
-  if (!m) return null;
-  const exp = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const s = String(expiry).trim();
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s) || /^(\d{4})(\d{2})(\d{2})/.exec(s);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+/** 计算到期日距今天的天数;无法解析返回 null */
+function daysUntil(expiry) {
+  const p = parseDate(expiry);
+  if (!p) return null;
+  const exp = Date.UTC(p[0], p[1] - 1, p[2]);
   const now = new Date();
   const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   return Math.round((exp - today) / 86400000);
+}
+
+/** 格式化到期时间为 YYYY-MM-DD;无法解析则原样截断 */
+function fmtDate(expiry) {
+  const p = parseDate(expiry);
+  if (!p) return expiry ? String(expiry).slice(0, 10) : '永久';
+  return `${p[0]}-${String(p[1]).padStart(2, '0')}-${String(p[2]).padStart(2, '0')}`;
 }
 
 /** 封装 DigitalPlat API 调用,返回解析后的 JSON;失败抛错(带状态和响应摘要) */
@@ -70,7 +85,7 @@ async function api(path, { method = 'GET', body } = {}) {
   return json;
 }
 
-/** 简单对齐表格 */
+/** 简单对齐表格(控制台日志用) */
 function fmtTable(headers, rows) {
   const widths = headers.map((h, i) =>
     Math.max(String(h).length, ...rows.map((r) => String(r[i] ?? '').length))
@@ -78,6 +93,15 @@ function fmtTable(headers, rows) {
   const line = (cells) => '  ' + cells.map((c, i) => String(c ?? '').padEnd(widths[i])).join('  ');
   const sep = '  ' + widths.map((w) => '-'.repeat(w)).join('  ');
   return [line(headers), sep, ...rows.map((r) => line(r))].join('\n');
+}
+
+/** Markdown 表格(GitHub Actions Job Summary 用) */
+function mdTable(headers, rows) {
+  return [
+    '| ' + headers.join(' | ') + ' |',
+    '| ' + headers.map(() => '---').join(' | ') + ' |',
+    ...rows.map((r) => '| ' + r.map((c) => String(c ?? '')).join(' | ') + ' |'),
+  ].join('\n');
 }
 
 /** 续期一个域名;free 域名在支付方式被拒时回退为不带支付方式重试一次 */
@@ -136,7 +160,7 @@ async function main() {
     else status = '窗口外';
     return { name, expiry, days, status, autoRenew: d.auto_renew ? '是' : '否', isFree: (d.slot_type || d.lifecycle_type) === 'free', raw: d };
   });
-  console.log(fmtTable(['域名', '状态', '到期时间', '剩余天数', '自动续'], rows.map((r) => [r.name, r.status, String(r.expiry).slice(0, 10), r.days === null ? '永久' : `${r.days}天`, r.autoRenew])));
+  console.log(fmtTable(['域名', '状态', '到期时间', '剩余天数', '自动续'], rows.map((r) => [r.name, r.status, fmtDate(r.expiry), r.days === null ? '永久' : `${r.days}天`, r.autoRenew])));
   console.log('');
 
   // 3) 自动续期明细:只处理窗口内的域名
@@ -167,6 +191,35 @@ async function main() {
   const renewed = results.filter((x) => x.action === 'renewed').length;
   const will = results.filter((x) => x.action === 'dry-run-将续期').length;
   console.log(`\n[renew] 完成: 窗口内 ${due.length} 个,续期 ${renewed} 个${DRY_RUN ? `(DRY-RUN 将续 ${will} 个)` : ''},失败 ${failures} 个`);
+
+  // 5) 写入 GitHub Actions Job Summary(运行页 Summary 区直接展示,无需展开步骤日志)
+  const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+  if (summaryPath) {
+    const md = [
+      `## 📋 DigitalPlat 域名每日检查 (${ts})`,
+      '',
+      `共 ${domains.length} 个域名 · 续期窗口: 到期前 ${THRESHOLD_DAYS} 天 · 每次续 ${YEARS} 年`,
+      '',
+      mdTable(['域名', '状态', '到期时间', '剩余天数', '自动续'], rows.map((r) => [r.name, r.status, fmtDate(r.expiry), r.days === null ? '永久' : `${r.days}天`, r.autoRenew])),
+      '',
+      '### 自动续期明细',
+    ];
+    if (due.length === 0) md.push('暂无到期域名,全部在窗口外或永久有效');
+    for (const r of due) {
+      if (DRY_RUN) md.push(`- 🟡 ${r.name}: 剩余 ${r.days} 天,将续期 ${YEARS} 年(预览)`);
+      else {
+        const done = results.find((x) => x.name === r.name);
+        md.push(done && done.action === 'renewed' ? `- ✅ ${r.name}: 续期成功 +${YEARS} 年` : `- ❌ ${r.name}: 续期失败`);
+      }
+    }
+    try {
+      appendFileSync(summaryPath, md.join('\n') + '\n');
+      console.log('[renew] 已写入 Job Summary');
+    } catch (e) {
+      console.warn('[renew] 写入 Job Summary 失败(不影响续期):', e.message);
+    }
+  }
+
   if (failures > 0) {
     console.error('[renew] 存在失败项,退出码 1(便于 GitHub Actions 邮件通知)');
     process.exit(1);
